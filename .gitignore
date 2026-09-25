@@ -1,0 +1,3 @@
+.runpod_key
+*.log
+__pycache__/
