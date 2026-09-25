@@ -25,11 +25,12 @@ pod สำหรับ MiniMax H3 บน ComfyUI (CUDA 13.0) ที่ **ไม�
 
 - **ปิด pod แล้วกด Terminate ได้เลย** — ของทั้งหมดอยู่ใน Volume ไม่หาย
 - คลิปที่เจนแล้วอยู่ใน Volume ที่ `/workspace/h3/ComfyUI/output` — ดาวน์โหลดแล้วลบทิ้งเป็นระยะ อย่าให้ Volume เต็ม
-- log การเปิดเครื่อง: `/workspace/h3/logs/boot.log` · log ComfyUI: `/workspace/h3/logs/comfyui.log`
+- log แยกตาม pod: `/workspace/h3/logs/<pod id>/boot.log` (การเปิดเครื่อง) · `/workspace/h3/logs/<pod id>/comfyui.log`
+- **เปิดหลาย pod พร้อมกันได้** (Volume เดียวกัน): ติดตั้ง/ตรวจโมเดลทำทีละเครื่อง เครื่องอื่นรอ (สถานะ `waiting`) · temp และฐานข้อมูล ComfyUI แยกอยู่บนดิสก์ของแต่ละเครื่อง · คลิปทุกเครื่องไปรวมที่ `output/` เดียวกัน (ชื่อคลิปมีชื่อตอนนำหน้า ไม่ชนกันเมื่อยิงเครื่องละตอน)
 - ถ้าบรรทัดใน boot.log ขึ้น `FATAL` = มีปัญหา ให้ส่ง log ให้ Claude ดู
 
 ## อยากอัปเดต (เฉพาะเมื่อตั้งใจ)
 
-แก้ `lock.env` (commit ของ ComfyUI/ปลั๊กอิน หรือโมเดล) → เพิ่ม `LOCK_VERSION` → push →
+**ปิด pod ทุกตัวก่อน** (การติดตั้งใหม่แทนที่โฟลเดอร์ ComfyUI ที่เครื่องอื่นใช้อยู่) → แก้ `lock.env` (commit ของ ComfyUI/ปลั๊กอิน หรือโมเดล) → เพิ่ม `LOCK_VERSION` → push →
 เปลี่ยน `H3_RAW` ในเทมเพลตให้ชี้ commit ใหม่ ครั้งถัดไปที่เปิด pod จะติดตั้งใหม่ให้เอง
 (โมเดลที่มีอยู่แล้วไม่โหลดซ้ำ) ถ้าเวอร์ชันใหม่มีปัญหา แค่ชี้ `H3_RAW` กลับ commit เดิม
