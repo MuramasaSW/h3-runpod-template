@@ -2,53 +2,24 @@
 # boot.sh — เปิด pod MiniMax H3 แบบล็อกเวอร์ชัน
 # ทุกอย่างอยู่ใน Network Volume ที่ /workspace/h3 ติดตั้งครั้งเดียว ครั้งต่อไปแค่เปิด ComfyUI
 # ไม่มีการอัปเดตเองเด็ดขาด: จะเปลี่ยนเวอร์ชันต้องแก้ lock.env + เพิ่ม LOCK_VERSION เท่านั้น
-# เปิดหลาย pod พร้อมกันบน Volume เดียวได้: log แยกต่อ pod · ติดตั้ง/ตรวจโมเดลทีละเครื่อง (ล็อก) ·
-# temp และฐานข้อมูลของ ComfyUI อยู่บนดิสก์ของแต่ละเครื่อง (ไม่ให้เครื่องใหม่ลบ temp / ล็อก db ของเครื่องที่เจนอยู่)
 
 H3=/workspace/h3
-POD=${RUNPOD_POD_ID:-local}
-LOGD=$H3/logs/$POD
-LOG=$LOGD/boot.log
-mkdir -p "$LOGD"
+LOG=$H3/logs/boot.log
+mkdir -p "$H3/logs"
 exec > >(tee -a "$LOG") 2>&1
 echo "==================== BOOT $(date -u '+%Y-%m-%d %H:%M:%S UTC') ===================="
 
 # บริการพื้นฐานของ RunPod (ssh / jupyter / nginx) — เปิดไว้ก่อน จะได้ดู log ได้ระหว่างติดตั้ง
-if [ -x /start.sh ]; then nohup /start.sh > "$LOGD/runpod_start.log" 2>&1 & fi
+if [ -x /start.sh ]; then nohup /start.sh > "$H3/logs/runpod_start.log" 2>&1 & fi
 
 # ---------- สถานะสำหรับแอป: ก่อน ComfyUI ขึ้น พอร์ต 8188 ตอบ /h3_status.json ----------
-# state = booting | waiting | installing | models | starting | fatal  ·  code = รหัสปัญหา (แอปแปลเป็นไทยเอง)
+# state = booting | installing | models | starting | fatal  ·  code = รหัสปัญหา (แอปแปลเป็นไทยเอง)
 mkdir -p /tmp/h3s
 status() { printf '{"state":"%s","code":"%s","lock":"%s"}
 ' "$1" "${2:-}" "${LOCK_VERSION:-}" > /tmp/h3s/h3_status.json; }
 status_server_on() { python3 -m http.server 8188 --bind 0.0.0.0 --directory /tmp/h3s > /dev/null 2>&1 & SPID=$!; }
 status_server_off() { [ -n "$SPID" ] && kill "$SPID" 2>/dev/null; wait "$SPID" 2>/dev/null; SPID=""; }
-fatal() { echo "FATAL[$1]: $2"; setup_unlock; status fatal "$1"; [ -z "$SPID" ] && status_server_on; sleep infinity; }
-
-# ---------- ล็อกขั้นติดตั้ง/โมเดล: เครื่องเดียวทำ เครื่องอื่นรอ (mkdir = atomic) ----------
-# เจ้าของล็อกแตะไฟล์ heartbeat ทุก 20 วิ · ถ้าไม่ขยับเกิน 3 นาที (เครื่องนั้นถูกปิดกลางทาง) = ล็อกค้าง ยึดต่อได้
-SLOCK=$H3/.setup_lock
-HBPID=""
-setup_lock() {
-    local said=""
-    while ! mkdir "$SLOCK" 2>/dev/null; do
-        local hb; hb=$(stat -c %Y "$SLOCK/heartbeat" 2>/dev/null || stat -c %Y "$SLOCK" 2>/dev/null || echo 0)
-        if [ $(( $(date +%s) - hb )) -gt 180 ]; then
-            echo "setup lock stale (owner $(cat "$SLOCK/owner" 2>/dev/null)) — taking over"
-            rm -rf "$SLOCK"; continue
-        fi
-        [ -z "$said" ] && { echo "waiting for pod $(cat "$SLOCK/owner" 2>/dev/null) to finish setup"; status waiting; said=1; }
-        sleep 5
-    done
-    echo "$POD" > "$SLOCK/owner"; touch "$SLOCK/heartbeat"
-    ( while sleep 20; do touch "$SLOCK/heartbeat" 2>/dev/null || exit; done ) & HBPID=$!
-}
-setup_unlock() {
-    [ -n "$HBPID" ] || return 0
-    kill "$HBPID" 2>/dev/null; HBPID=""
-    [ "$(cat "$SLOCK/owner" 2>/dev/null)" = "$POD" ] && rm -rf "$SLOCK"
-    return 0
-}
+fatal() { echo "FATAL[$1]: $2"; status fatal "$1"; [ -z "$SPID" ] && status_server_on; sleep infinity; }
 status booting
 status_server_on
 
@@ -58,27 +29,18 @@ echo "driver CUDA: ${CV:-?}"
 if [ -n "$CV" ] && [ "$CV" -lt 13 ]; then fatal CUDA_TOO_OLD "เครื่องนี้รองรับ CUDA $CV ต่ำกว่า 13 — ปิดแล้วจองเครื่องใหม่"; fi
 
 # ---------- ไฟล์ล็อก: เอาจาก GitHub (commit ที่เทมเพลตชี้) ถ้าไม่ได้ใช้สำเนาใน volume ----------
-# ใช้สำเนาใน /tmp ของเครื่องนี้ · อัปเดตสำเนาใน volume แบบ เขียนไฟล์ชั่วคราว → mv (เครื่องอื่นไม่เจอไฟล์ครึ่ง ๆ)
-put() { cp "$1" "$2.$POD.tmp" && mv -f "$2.$POD.tmp" "$2"; }
-REQ_LOCK=""
 if [ -n "$H3_RAW" ] && curl -fsSL --retry 3 "$H3_RAW/lock.env" -o /tmp/lock.env; then
-    put /tmp/lock.env "$H3/lock.env"
-    curl -fsSL --retry 3 "$H3_RAW/boot.sh" -o /tmp/boot.sh.new && put /tmp/boot.sh.new "$H3/boot.sh"
-    if curl -fsSL --retry 3 "$H3_RAW/requirements-lock.txt" -o /tmp/requirements-lock.txt 2>/dev/null; then
-        REQ_LOCK=/tmp/requirements-lock.txt
-        put /tmp/requirements-lock.txt "$H3/requirements-lock.txt"
-    else
-        rm -f "$H3/requirements-lock.txt"
-    fi
+    cp /tmp/lock.env "$H3/lock.env"
+    curl -fsSL --retry 3 "$H3_RAW/boot.sh" -o "$H3/boot.sh" || true
+    curl -fsSL --retry 3 "$H3_RAW/requirements-lock.txt" -o /tmp/requirements-lock.txt 2>/dev/null \
+        && cp /tmp/requirements-lock.txt "$H3/requirements-lock.txt" || rm -f "$H3/requirements-lock.txt"
     echo "lock.env from $H3_RAW"
 elif [ -f "$H3/lock.env" ]; then
     echo "GitHub unreachable — using cached $H3/lock.env"
-    cp "$H3/lock.env" /tmp/lock.env
-    [ -f "$H3/requirements-lock.txt" ] && cp "$H3/requirements-lock.txt" /tmp/requirements-lock.txt && REQ_LOCK=/tmp/requirements-lock.txt
 else
     fatal NO_LOCK "no lock.env (set H3_RAW in the template)"
 fi
-source /tmp/lock.env
+source "$H3/lock.env"
 
 # กันลืมเลือก Network Volume: ถ้ายังไม่เคยติดตั้งและ /workspace มีที่ว่างไม่ถึง 60 GB = ไม่ได้ต่อ Volume
 if [ ! -f "$H3/installed_version" ] && [ "$(df -BG --output=avail /workspace | tail -1 | tr -dc 0-9)" -lt 60 ]; then
@@ -119,9 +81,9 @@ install_all() {
         echo "node $name @ ${commit:0:10}"
     done || return 1
 
-    if [ -n "$REQ_LOCK" ]; then
+    if [ -f "$H3/requirements-lock.txt" ]; then
         echo "pip: exact lock file"
-        $PIP install -c "$H3/constraints.txt" -r "$REQ_LOCK" || return 1
+        $PIP install -c "$H3/constraints.txt" -r "$H3/requirements-lock.txt" || return 1
     else
         echo "pip: first resolve (will be frozen into requirements-lock.txt)"
         local REQS="-r $COMFY.new/requirements.txt"
@@ -147,8 +109,6 @@ install_all() {
     echo ">>> INSTALL done"
 }
 
-# ติดตั้ง + ตรวจโมเดล ทำทีละเครื่อง (อีกเครื่องที่เปิดพร้อมกันรอ แล้วเห็นว่าติดตั้งแล้ว ข้ามไปเลย)
-setup_lock
 if [ "$(cat "$H3/installed_version" 2>/dev/null)" != "$LOCK_VERSION" ] || [ ! -f "$COMFY/main.py" ]; then
     status installing
     install_all || fatal INSTALL "install failed — see $LOG"
@@ -185,7 +145,6 @@ for line in os.environ["MODELS"].strip().splitlines():
     print(f"done  {os.path.basename(path)} in {time.time()-t:.0f}s", flush=True)
 shutil.rmtree(os.path.join(h3, "dl"), ignore_errors=True)
 PY
-setup_unlock
 
 # ---------- เปิด ComfyUI (ถ้าล่มจะเปิดใหม่ให้เอง) ----------
 export TORCH_FORCE_WEIGHTS_ONLY_LOAD=1
@@ -193,19 +152,15 @@ cd "$COMFY"
 echo ">>> ComfyUI lock v$LOCK_VERSION starting on :8188"
 status starting
 status_server_off
-# temp + ฐานข้อมูล ComfyUI อยู่บนดิสก์ของเครื่องนี้ (ComfyUI ลบ temp ทุกครั้งที่เปิด และล็อกไฟล์ db — ถ้าอยู่ใน volume
-# เครื่องที่เปิดทีหลังจะลบ temp ของเครื่องที่กำลังเจน และเปิด db ไม่ได้)
-LOCAL=/tmp/comfy_local
-mkdir -p "$LOCAL"
 fails=0
 while true; do
     t0=$SECONDS
-    "$VENV/bin/python" main.py --listen 0.0.0.0 --port 8188         --temp-directory "$LOCAL" --database-url "sqlite:///$LOCAL/comfyui.db" >> "$LOGD/comfyui.log" 2>&1
+    "$VENV/bin/python" main.py --listen 0.0.0.0 --port 8188 >> "$H3/logs/comfyui.log" 2>&1
     rc=$?
     if [ $((SECONDS - t0)) -lt 120 ]; then fails=$((fails + 1)); else fails=0; fi
     echo "ComfyUI exited ($rc) at $(date -u +%H:%M:%S)"
     if [ $fails -ge 3 ]; then
-        echo "FATAL[COMFY_CRASH]: ComfyUI crashes on start — last error:"; grep -E "Error|error" "$LOGD/comfyui.log" | tail -5
+        echo "FATAL[COMFY_CRASH]: ComfyUI crashes on start — last error:"; grep -E "Error|error" "$H3/logs/comfyui.log" | tail -5
         status fatal COMFY_CRASH; status_server_on; sleep 600; status_server_off; fails=0
     else
         sleep 5
