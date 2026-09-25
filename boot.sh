@@ -26,6 +26,12 @@ else
 fi
 source "$H3/lock.env"
 
+# กันลืมเลือก Network Volume: ถ้ายังไม่เคยติดตั้งและ /workspace มีที่ว่างไม่ถึง 60 GB = ไม่ได้ต่อ Volume
+if [ ! -f "$H3/installed_version" ] && [ "$(df -BG --output=avail /workspace | tail -1 | tr -dc 0-9)" -lt 60 ]; then
+    echo "FATAL: ไม่พบ Network Volume h3-studio — ปิด pod นี้ แล้ว Deploy ใหม่โดยเลือก Network volume: h3-studio"
+    sleep infinity
+fi
+
 PY_SYS=$(command -v python3.12 || command -v python3)
 VENV=$H3/venv
 COMFY=$H3/ComfyUI
