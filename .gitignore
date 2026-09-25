@@ -1,3 +1,4 @@
 .runpod_key
 *.log
 __pycache__/
+.jupyter_password

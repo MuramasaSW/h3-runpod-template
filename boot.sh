@@ -40,11 +40,17 @@ install_all() {
     local PIP="$VENV/bin/python -m pip"
     $PIP freeze --all 2>/dev/null | grep -Ei '^(torch|torchvision|torchaudio|triton)==' > "$H3/constraints.txt"
     echo "torch from base image:"; cat "$H3/constraints.txt"
-    if ! grep -qi '^torchaudio==' "$H3/constraints.txt"; then
-        local TV; TV=$(grep -i '^torch==' "$H3/constraints.txt" | cut -d= -f3 | cut -d+ -f1)
-        $PIP install "torchaudio==$TV" --index-url https://download.pytorch.org/whl/cu130 || return 1
-        $PIP freeze --all | grep -Ei '^torchaudio==' >> "$H3/constraints.txt"
-    fi
+    # torchvision/torchaudio ต้องมาจาก index cu130 ให้ตรงกับ torch ของ image
+    # (ถ้าปล่อยให้ pip ดึงจาก PyPI จะได้ตัวที่ไม่เข้ากัน → "operator torchvision::nms does not exist")
+    local TV; TV=$(grep -i '^torch==' "$H3/constraints.txt" | cut -d= -f3)
+    case "$TV" in 2.9.1*) VIS=0.24.1 ;; *) echo "unknown torch $TV — add its torchvision version"; return 1 ;; esac
+    local CU="+${TV#*+}"
+    grep -qi '^torchvision==' "$H3/constraints.txt" || \
+        { $PIP install --no-deps "torchvision==$VIS$CU" --index-url https://download.pytorch.org/whl/cu130 || return 1; }
+    grep -qi '^torchaudio==' "$H3/constraints.txt" || \
+        { $PIP install --no-deps "torchaudio==${TV%%+*}$CU" --index-url https://download.pytorch.org/whl/cu130 || return 1; }
+    $PIP freeze --all 2>/dev/null | grep -Ei '^(torch|torchvision|torchaudio|triton)==' > "$H3/constraints.txt"
+    echo "torch stack (locked):"; cat "$H3/constraints.txt"
 
     git clone -q "$COMFYUI_REPO" "$COMFY.new" && git -C "$COMFY.new" checkout -q "$COMFYUI_COMMIT" || return 1
     echo "$NODES" | while IFS='|' read -r name repo commit; do
@@ -64,6 +70,11 @@ install_all() {
         $PIP install -c "$H3/constraints.txt" $REQS "transformers==5.3.0" "huggingface_hub[hf_xet]" || return 1
     fi
     $PIP freeze > "$H3/pip-freeze.txt"
+    # ตรวจก่อนว่า torch stack ใช้ได้จริง (กันพังเงียบ ๆ ตอนเปิด ComfyUI)
+    "$VENV/bin/python" -c "import torch, torchvision, torchaudio, torchvision.ops; print('torch check ok', torch.__version__, torchvision.__version__, torch.cuda.is_available())" \
+        || { echo "torch stack check failed"; return 1; }
+    grep -Ei '^(torch|torchvision|torchaudio)==' "$H3/pip-freeze.txt" | diff - <(grep -Ei '^(torch|torchvision|torchaudio)==' "$H3/constraints.txt") >/dev/null \
+        || { echo "pip changed the torch stack:"; grep -Ei '^(torch|torchvision|torchaudio)==' "$H3/pip-freeze.txt"; return 1; }
 
     # ย้ายโฟลเดอร์ models/ input/ output/ เดิมไว้ ไม่ให้หาย
     if [ -d "$COMFY" ]; then
@@ -113,11 +124,20 @@ shutil.rmtree(os.path.join(h3, "dl"), ignore_errors=True)
 PY
 
 # ---------- เปิด ComfyUI (ถ้าล่มจะเปิดใหม่ให้เอง) ----------
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512 TORCH_FORCE_WEIGHTS_ONLY_LOAD=1
+export TORCH_FORCE_WEIGHTS_ONLY_LOAD=1
 cd "$COMFY"
 echo ">>> ComfyUI lock v$LOCK_VERSION starting on :8188"
+fails=0
 while true; do
+    t0=$SECONDS
     "$VENV/bin/python" main.py --listen 0.0.0.0 --port 8188 >> "$H3/logs/comfyui.log" 2>&1
-    echo "ComfyUI exited ($?) at $(date -u +%H:%M:%S) — restarting in 5s"
-    sleep 5
+    rc=$?
+    if [ $((SECONDS - t0)) -lt 120 ]; then fails=$((fails + 1)); else fails=0; fi
+    echo "ComfyUI exited ($rc) at $(date -u +%H:%M:%S)"
+    if [ $fails -ge 3 ]; then
+        echo "FATAL: ComfyUI crashes on start — last error:"; grep -E "Error|error" "$H3/logs/comfyui.log" | tail -5
+        sleep 600; fails=0
+    else
+        sleep 5
+    fi
 done
