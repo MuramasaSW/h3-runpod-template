@@ -52,6 +52,43 @@ VENV=$H3/venv
 COMFY=$H3/ComfyUI
 export PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# ---------- โหมด: image ใหญ่ที่มี torch ในตัว (full) · image เล็กที่ไม่มี torch (slim) ----------
+# slim (2026-11-08): torch + ทุกแพ็กเกจอยู่ใน venv-slim บน volume (ติดตั้งครั้งเดียว)
+# → เครื่องใหม่ไม่ต้องโหลด image PyTorch ~10 GB ก่อนเปิด · full ยังทำงานแบบเดิมทุกอย่าง (venv เดิมไม่ถูกแตะ)
+if "$PY_SYS" -c "import torch" >/dev/null 2>&1; then MODE=full; else MODE=slim; VENV=$H3/venv-slim; fi
+echo "mode: $MODE · $("$PY_SYS" -V 2>&1) · pod ${RUNPOD_POD_ID:-?}"
+
+# แพ็กเกจของ Ubuntu ที่ติดมากับ freeze ของ image ใหญ่ — pip ติดตั้งไม่ได้ และ ComfyUI ไม่ใช้
+SLIM_SKIP='^(python-apt|dbus-python|PyGObject|launchpadlib|lazr\.|wadllib)'
+install_slim() {
+    echo ">>> INSTALL slim venv ($SLIM_TAG)"
+    rm -rf "$VENV"
+    "$PY_SYS" -m venv "$VENV" || return 1
+    grep -viE "$SLIM_SKIP" "$H3/requirements-lock.txt" > /tmp/req-slim.txt
+    "$VENV/bin/python" -m pip install --extra-index-url https://download.pytorch.org/whl/cu130 \
+        -r /tmp/req-slim.txt || return 1
+    "$VENV/bin/python" -m pip freeze > "$H3/pip-freeze-slim.txt"
+    "$VENV/bin/python" -c "import torch, torchvision, torchaudio, torchvision.ops, cv2, av; print('torch check ok', torch.__version__, torchvision.__version__, torch.cuda.is_available())" \
+        || { echo "slim torch check failed"; return 1; }
+    echo "$SLIM_TAG" > "$VENV/.slim_ready"
+    echo ">>> INSTALL slim done"
+}
+# หลายเครื่องเปิดพร้อมกัน: เครื่องแรกติดตั้ง เครื่องอื่นรอ (state=waiting) · ล็อกค้างเกิน 40 นาที = เครื่องที่ติดตั้งตายไปแล้ว
+slim_with_lock() {
+    local LOCKD=$H3/venv-slim.lock rc=0
+    while ! mkdir "$LOCKD" 2>/dev/null; do
+        [ "$(cat "$VENV/.slim_ready" 2>/dev/null)" = "$SLIM_TAG" ] && return 0
+        if [ -n "$(find "$LOCKD" -maxdepth 0 -mmin +40 2>/dev/null)" ]; then
+            echo "stale slim lock ($(cat "$LOCKD/owner" 2>/dev/null)) — taking over"; rm -rf "$LOCKD"; continue
+        fi
+        status waiting; sleep 10
+    done
+    echo "${RUNPOD_POD_ID:-?}" > "$LOCKD/owner"
+    if [ "$(cat "$VENV/.slim_ready" 2>/dev/null)" != "$SLIM_TAG" ]; then status installing; install_slim; rc=$?; fi
+    rm -rf "$LOCKD"
+    return $rc
+}
+
 # ---------- ติดตั้ง (เฉพาะครั้งแรก หรือเมื่อ LOCK_VERSION เปลี่ยน) ----------
 install_all() {
     echo ">>> INSTALL lock v$LOCK_VERSION"
@@ -109,7 +146,19 @@ install_all() {
     echo ">>> INSTALL done"
 }
 
-if [ "$(cat "$H3/installed_version" 2>/dev/null)" != "$LOCK_VERSION" ] || [ ! -f "$COMFY/main.py" ]; then
+if [ "$MODE" = slim ]; then
+    # slim ใช้ ComfyUI + ปลั๊กอินชุดเดิมบน volume (ติดตั้งโดย image ใหญ่) — ไม่แตะโฟลเดอร์ ComfyUI เลย
+    if [ "$(cat "$H3/installed_version" 2>/dev/null)" != "$LOCK_VERSION" ] || [ ! -f "$COMFY/main.py" ]; then
+        fatal SLIM_NO_COMFY "ComfyUI lock v$LOCK_VERSION ยังไม่ได้ติดตั้งบน volume — เปิดด้วยเทมเพลตตัวใหญ่ 1 ครั้งก่อน"
+    fi
+    [ -f "$H3/requirements-lock.txt" ] || fatal NO_LOCK "no requirements-lock.txt for slim mode"
+    SLIM_TAG="lock$LOCK_VERSION-$(md5sum < "$H3/requirements-lock.txt" | cut -c1-12)-$("$PY_SYS" -V 2>&1 | tr -dc 0-9.)"
+    if [ "$(cat "$VENV/.slim_ready" 2>/dev/null)" != "$SLIM_TAG" ]; then
+        slim_with_lock || fatal INSTALL "slim install failed — see $LOG"
+    else
+        echo "slim venv ready ($SLIM_TAG) — skip install"
+    fi
+elif [ "$(cat "$H3/installed_version" 2>/dev/null)" != "$LOCK_VERSION" ] || [ ! -f "$COMFY/main.py" ]; then
     status installing
     install_all || fatal INSTALL "install failed — see $LOG"
 else
