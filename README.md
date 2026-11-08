@@ -3,6 +3,19 @@
 pod สำหรับ MiniMax H3 บน ComfyUI (CUDA 13.0) ที่ **ไม่อัปเดตเอง**
 ทุกอย่าง (ComfyUI, ปลั๊กอิน, โมเดล) ถูกล็อกไว้ใน `lock.env` และเก็บถาวรใน Network Volume
 
+## ⚡ เทมเพลตเบา (ใช้เป็นหลักตั้งแต่ 8 พ.ย. 2026)
+
+| เทมเพลต | image | ใช้ venv |
+|---|---|---|
+| **H3 Studio (เบา) CUDA 13.0** (`cci0mm1mjb`) | `runpod/base:1.4.1-ubuntu2404` ~0.7 GB | `/workspace/h3/venv-slim` (torch อยู่บน volume) |
+| H3 Studio (ล็อกเวอร์ชัน) CUDA 13.0 (`jtr5ey5lih`) | `runpod/pytorch` ~9.6 GB | `/workspace/h3/venv` (torch จาก image) |
+
+- ทั้งสองเทมเพลตใช้ `boot.sh` ตัวเดียวกัน ถ้า image ไม่มี torch ก็จะเข้าโหมด slim ให้เอง ใช้ ComfyUI + โมเดลชุดเดียวกันบน volume
+- ตัวเบาโหลดระบบเครื่องราว 3 นาที ส่วนตัวใหญ่บางเครื่องใช้เกิน 15 นาที ความเร็วเจนคลิปเท่ากัน (ทดสอบ 8 พ.ย.: 248 วิ เทียบกับ 255 วิ)
+- venv-slim ติดตั้งครั้งเดียวราว 18 นาที ถ้าไฟล์ requirements-lock / LOCK_VERSION / Python เปลี่ยน จะติดตั้งใหม่ให้เอง
+  ระหว่างนั้นเครื่องอื่นจะรอ (state `waiting`)
+- ถ้าตัวเบามีปัญหา ให้แก้ `TEMPLATE = TEMPLATE_FULL` ใน `runpod-shooter/podshot/config.py`
+
 ## ส่วนประกอบใน RunPod
 
 | อย่าง | ชื่อ | หมายเหตุ |
